@@ -191,7 +191,14 @@ const httpServer = createServer(async (req, res) => {
     });
 
     await server.connect(transport);
-    await transport.handleRequest(req, res, await readBody(req));
+    const body = await readBody(req);
+    let parsedBody;
+    try {
+      parsedBody = body.length > 0 ? JSON.parse(body.toString()) : undefined;
+    } catch {
+      parsedBody = undefined;
+    }
+    await transport.handleRequest(req, res, parsedBody);
     return;
   }
 
