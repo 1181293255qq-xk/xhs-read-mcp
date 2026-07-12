@@ -1,0 +1,18 @@
+{
+  "name": "xhs-read-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for reading Xiaohongshu (XHS) posts",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.12.1",
+    "sharp": "0.33.4",
+    "zod": "3.23.8"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
