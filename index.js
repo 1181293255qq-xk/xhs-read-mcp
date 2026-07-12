@@ -1,10 +1,10 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import { execSync, spawnSync } from "child_process";
+import { execSync } from "child_process";
 import { mkdirSync, unlinkSync } from "fs";
 import { join } from "path";
-import { createServer } from "http";
+import express from "express";
 import sharp from "sharp";
 
 const PORT = process.env.PORT || 3000;
@@ -120,11 +120,11 @@ function createMcpServer() {
       }
 
       // 6. æ ¼å¼åŒ–æ–‡æœ¬
-      let text = `í ½í³– ${title}\n`;
-      text += `í ½í±¤ ${user}`;
+      let text = `ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ${title}\n`;
+      text += `ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ${user}`;
       if (time) text += ` Â· ${time}`;
-      text += `\nâ¤ï¸ ${likes}  â­ ${collects}  í ½í²¬ ${comments}`;
-      if (noteType === "video") text += `  í ½í³¹ è§†é¢‘å¸–`;
+      text += `\nâ¤ï¸ ${likes}  â­ ${collects}  ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ${comments}`;
+      if (noteType === "video") text += `  ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ è§†é¢‘å¸–`;
       text += `\n\n${desc}`;
       text += commentText;
 
