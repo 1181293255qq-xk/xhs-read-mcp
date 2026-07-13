@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import { execSync } from "child_process";
-import { mkdirSync, unlinkSync } from "fs";
+import { writeFileSync, readFileSync, existsSync, mkdirSync, unlinkSync } from "fs";
 import { join } from "path";
 import { createServer } from "http";
 import sharp from "sharp";
@@ -16,6 +16,34 @@ function getXhsCookie() {
   const webId = process.env.XHS_WEB_ID || "";
   if (!webSession) return null;
   return `web_session=${webSession}; a1=${a1}; webId=${webId}`;
+}
+
+// ── 签名生成 ──────────────────────────────────────────────────────────────────
+function generateSignature(uri, data, cookie) {
+  try {
+    const dataFile = "/tmp/xhs_sign_data.json";
+    writeFileSync(dataFile, JSON.stringify(data));
+    const result = execSync(
+      `node generate_sign.js "${uri}" "${dataFile}" "${cookie.replace(/"/g, '\\"')}"`,
+      { encoding: "utf-8", timeout: 10000, maxBuffer: 5 * 1024 * 1024 }
+    );
+    const parsed = JSON.parse(result.trim());
+    return {
+      "x-s": parsed["X-s"] || parsed["x-s"] || "",
+      "x-t": String(parsed["X-t"] || parsed["x-t"] || ""),
+    };
+  } catch (e) {
+    console.error(`Signature generation failed: ${e.message}`);
+    return null;
+  }
+}
+
+// ── 生成 search_id ────────────────────────────────────────────────────────────
+function generateSearchId() {
+  const timestamp = Date.now() << 64;
+  const random = Math.floor(Math.random() * 2147483646);
+  const num = BigInt(timestamp) + BigInt(random);
+  return num.toString(36).toUpperCase() || "0";
 }
 
 // ── sharp 图片处理 ────────────────────────────────────────────────────────────
@@ -39,7 +67,7 @@ async function sharpProcess(items) {
 function createMcpServer() {
   const server = new McpServer({
     name: "xhs-search-mcp",
-    version: "2.2.0",
+    version: "3.0.0",
   });
 
   // ── xhs_read tool（保留原有功能）────────────────────────────────────────────
@@ -169,7 +197,7 @@ function createMcpServer() {
     }
   );
 
-  // ── xhs_search tool（v2.2 API优先）──────────────────────────────────────────
+  // ── xhs_search tool（v3.0 带签名）───────────────────────────────────────────
   server.tool(
     "xhs_search",
     "搜索小红书笔记。输入关键词，返回相关笔记列表（标题、作者、点赞数、链接）。需配置cookie环境变量。Keywords: 小红书 搜索 search xhs",
@@ -185,199 +213,110 @@ function createMcpServer() {
       }
 
       const XHS_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
-      
-      const sortMap = { 
-        general: "general", 
-        popularity: "popularity_desc", 
-        time: "time_desc" 
-      };
+
+      // 检查 signature.js 是否存在
+      if (!existsSync("./signature.js")) {
+        // 尝试下载
+        try {
+          execSync(`curl -sL https://raw.githubusercontent.com/leeguooooo/xhs-python-sdk/main/xhs_sdk/core/signature.js -o signature.js`, { encoding: "utf-8", timeout: 30000 });
+        } catch (e) {
+          return { content: [{ type: "text", text: "❌ 签名文件不存在且下载失败。请手动放置 signature.js" }] };
+        }
+      }
+
+      // 构造搜索请求
+      const sortMap = { general: "general", popularity: "popularity_desc", time: "time_desc" };
       const sortValue = sortMap[sort] || "general";
-      
-      // ── 方案1: 直接调小红书搜索API ──────────────────────────────────────────
-      // 小红书web搜索API，POST请求
-      const apiUrl = "https://edith.xiaohongshu.com/api/sns/v1/search/notes";
-      const postBody = JSON.stringify({
+      const searchId = generateSearchId();
+
+      const searchData = {
         keyword: keyword,
         page: 1,
         page_size: Math.min(limit, 50),
-        search_id: "",
+        search_id: searchId,
         sort: sortValue,
         note_type: 0,
-      });
+        ext_flags: [],
+        geo: "",
+        image_formats: JSON.stringify(["jpg", "webp", "avif"]),
+      };
 
-      try {
-        const curlCmd = `curl -sL -X POST "${apiUrl}" \
-          -A "${XHS_UA}" \
-          -b "${cookie}" \
-          -H "Content-Type: application/json" \
-          -H "Origin: https://www.xiaohongshu.com" \
-          -H "Referer: https://www.xiaohongshu.com/" \
-          -H "Accept: application/json" \
-          -d '${postBody.replace(/'/g, "'\\''")}' \
-          --max-time 15`;
-        
-        const apiResult = execSync(curlCmd, { encoding: "utf-8", maxBuffer: 10 * 1024 * 1024 });
-        
-        // 尝试解析API返回
-        const apiData = JSON.parse(apiResult);
-        
-        if (apiData?.data?.items && apiData.data.items.length > 0) {
-          const items = apiData.data.items;
-          let resultText = `������ 搜索"${keyword}" - 找到${items.length}条结果：\n\n`;
-          
-          for (let i = 0; i < Math.min(items.length, limit); i++) {
-            const item = items[i];
-            const note = item.note_card || item.note || item;
-            const noteId = note.note_id || note.noteId || item.id || "";
-            const title = note.display_title || note.title || "(无标题)";
-            const user = note.user?.nickname || note.user?.nickName || "未知用户";
-            const likes = note.interact_info?.liked_count || "0";
-            const noteType = note.type || "";
-            const link = noteId ? `https://www.xiaohongshu.com/explore/${noteId}` : "";
-            
-            resultText += `${i + 1}. ${title}\n`;
-            resultText += `   ������ ${user}  ❤️ ${likes}`;
-            if (noteType === "video") resultText += `  ������ 视频`;
-            if (link) resultText += `\n   ������ ${link}`;
-            resultText += `\n\n`;
-          }
-          
-          resultText += `---\n������ 用 xhs_read 工具传入链接可查看完整笔记内容和图片。`;
-          return { content: [{ type: "text", text: resultText }] };
-        }
-        
-        // API返回了但没有items
-        if (apiData?.code && apiData.code !== 0) {
-          // API需要签名，继续尝试其他方案
-          console.error(`API returned code: ${apiData.code}, msg: ${apiData.msg || ""}`);
-        }
-      } catch (apiErr) {
-        console.error(`API search failed: ${apiErr.message}`);
+      const uri = "/api/sns/web/v1/search/notes";
+
+      // 生成签名
+      const signature = generateSignature(uri, searchData, cookie);
+      if (!signature) {
+        return { content: [{ type: "text", text: "❌ 签名生成失败。请检查 signature.js 是否正确加载。" }] };
       }
 
-      // ── 方案2: 搜索页面 + 过滤备案信息 ──────────────────────────────────────
-      const searchUrl = `https://www.xiaohongshu.com/search_result?keyword=${encodeURIComponent(keyword)}&source=web_search_result_notes&type=51&sort=${sortValue}`;
+      // 写入请求体到临时文件
+      const bodyFile = "/tmp/xhs_search_body.json";
+      writeFileSync(bodyFile, JSON.stringify(searchData));
 
-      let html;
+      // 构造 curl 命令
+      const apiUrl = `https://edith.xiaohongshu.com${uri}`;
+      const curlCmd = `curl -sL -X POST "${apiUrl}" \
+        -A "${XHS_UA}" \
+        -b "${cookie}" \
+        -H "Content-Type: application/json;charset=UTF-8" \
+        -H "Origin: https://www.xiaohongshu.com" \
+        -H "Referer: https://www.xiaohongshu.com/" \
+        -H "Accept: application/json" \
+        -H "x-s: ${signature["x-s"]}" \
+        -H "x-t: ${signature["x-t"]}" \
+        -d @${bodyFile} \
+        --max-time 15`;
+
+      let apiResult;
       try {
-        const curlCmd = `curl -sL -A "${XHS_UA}" -b "${cookie}" -H "Referer: https://www.xiaohongshu.com/" --max-time 15 "${searchUrl}"`;
-        html = execSync(curlCmd, { encoding: "utf-8", maxBuffer: 10 * 1024 * 1024 });
+        apiResult = execSync(curlCmd, { encoding: "utf-8", maxBuffer: 10 * 1024 * 1024 });
       } catch (e) {
         return { content: [{ type: "text", text: `搜索请求失败: ${e.message}` }] };
       }
 
-      const stateMatch = html.match(/window\.__INITIAL_STATE__\s*=\s*(\{[\s\S]+?\})\s*<\/script>/);
-      if (!stateMatch) {
-        if (html.includes("login") || html.includes("登录")) {
-          return { content: [{ type: "text", text: "❌ Cookie已过期，请重新获取cookie值。" }] };
-        }
-        return { content: [{ type: "text", text: `无法解析搜索页面。HTML长度: ${html.length}` }] };
+      // 解析API返回
+      let apiData;
+      try {
+        apiData = JSON.parse(apiResult);
+      } catch (e) {
+        return { content: [{ type: "text", text: `API返回解析失败: ${e.message}\n返回内容: ${apiResult.substring(0, 500)}` }] };
       }
 
-      let state;
-      try {
-        const stateStr = stateMatch[1].replace(/undefined/g, "null");
-        state = JSON.parse(stateStr);
-      } catch (e) {
-        return { content: [{ type: "text", text: `JSON解析失败: ${e.message}` }] };
+      // 检查API错误
+      if (apiData.code && apiData.code !== 0) {
+        return { content: [{ type: "text", text: `❌ API返回错误: code=${apiData.code}, msg=${apiData.msg || ""}` }] };
       }
 
       // 提取搜索结果
-      let notes = state?.search?.notes || state?.search?.feeds || [];
-      
-      // 过滤掉备案/页脚信息
-      const footerKeywords = ["ICP", "营业执照", "公网安备", "举报", "医疗器械", "药品信息", "网文"];
-      notes = notes.filter(n => {
-        const title = n.displayTitle || n.title || n.display_title || "";
-        return !footerKeywords.some(kw => title.includes(kw));
-      });
-
-      if (notes && notes.length > 0) {
-        const maxResults = Math.min(notes.length, limit, 50);
-        let resultText = `������ 搜索"${keyword}" - 找到${notes.length}条结果（显示前${maxResults}条）：\n\n`;
-        
-        for (let i = 0; i < maxResults; i++) {
-          const note = notes[i];
-          const noteId = note.noteId || note.id || note.note_id || "";
-          const title = note.displayTitle || note.title || note.display_title || "(无标题)";
-          const user = note.user?.nickName || note.user?.nickname || "未知用户";
-          const likes = note.interactInfo?.likedCount || "0";
-          const link = noteId ? `https://www.xiaohongshu.com/explore/${noteId}` : "";
-          
-          resultText += `${i + 1}. ${title}\n`;
-          resultText += `   ������ ${user}  ❤️ ${likes}`;
-          if (link) resultText += `\n   ������ ${link}`;
-          resultText += `\n\n`;
-        }
-        
-        resultText += `---\n������ 用 xhs_read 工具传入链接可查看完整笔记内容和图片。`;
-        return { content: [{ type: "text", text: resultText }] };
+      const items = apiData?.data?.items || [];
+      if (items.length === 0) {
+        return { content: [{ type: "text", text: `搜索"${keyword}"未找到结果。` }] };
       }
 
-      // ── 方案3: 返回调试信息 ──────────────────────────────────────────────────
-      // 递归搜索state结构
-      function findNotesInState(obj, depth = 0) {
-        if (depth > 5 || !obj || typeof obj !== "object") return [];
-        if (Array.isArray(obj) && obj.length > 0) {
-          const first = obj[0];
-          if (first && typeof first === "object" && (first.noteId || first.id || first.displayTitle || first.note_card)) {
-            return obj;
-          }
-        }
-        for (const key of Object.keys(obj)) {
-          if (obj[key] && typeof obj[key] === "object") {
-            const found = findNotesInState(obj[key], depth + 1);
-            if (found.length > 0) return found;
-          }
-        }
-        return [];
+      // 格式化结果
+      let resultText = `������ 搜索"${keyword}" - 找到${items.length}条结果：\n\n`;
+      const maxResults = Math.min(items.length, limit, 50);
+
+      for (let i = 0; i < maxResults; i++) {
+        const item = items[i];
+        const note = item.note_card || item.note || item;
+        const noteId = note.note_id || note.noteId || item.id || "";
+        const title = note.display_title || note.title || "(无标题)";
+        const user = note.user?.nickname || note.user?.nickName || "未知用户";
+        const likes = note.interact_info?.liked_count || "0";
+        const noteType = note.type || "";
+        const link = noteId ? `https://www.xiaohongshu.com/explore/${noteId}` : "";
+
+        resultText += `${i + 1}. ${title}\n`;
+        resultText += `   ������ ${user}  ❤️ ${likes}`;
+        if (noteType === "video") resultText += `  ������ 视频`;
+        if (link) resultText += `\n   ������ ${link}`;
+        resultText += `\n\n`;
       }
 
-      const deepNotes = findNotesInState(state);
-      const filteredDeep = deepNotes.filter(n => {
-        const title = n.displayTitle || n.title || n.display_title || "";
-        return !footerKeywords.some(kw => title.includes(kw));
-      });
+      resultText += `---\n������ 用 xhs_read 工具传入链接可查看完整笔记内容和图片。`;
 
-      if (filteredDeep.length > 0) {
-        const maxResults = Math.min(filteredDeep.length, limit, 50);
-        let resultText = `������ 搜索"${keyword}" - 找到${filteredDeep.length}条结果（显示前${maxResults}条）：\n\n`;
-        
-        for (let i = 0; i < maxResults; i++) {
-          const note = filteredDeep[i];
-          const noteId = note.noteId || note.id || note.note_id || "";
-          const title = note.displayTitle || note.title || note.display_title || "(无标题)";
-          const user = note.user?.nickName || note.user?.nickname || "未知用户";
-          const likes = note.interactInfo?.likedCount || "0";
-          const link = noteId ? `https://www.xiaohongshu.com/explore/${noteId}` : "";
-          
-          resultText += `${i + 1}. ${title}\n`;
-          resultText += `   ������ ${user}  ❤️ ${likes}`;
-          if (link) resultText += `\n   ������ ${link}`;
-          resultText += `\n\n`;
-        }
-        
-        resultText += `---\n������ 用 xhs_read 工具传入链接可查看完整笔记内容和图片。`;
-        return { content: [{ type: "text", text: resultText }] };
-      }
-
-      // 全部失败，返回调试信息
-      function getKeys(obj, depth = 0, maxDepth = 3) {
-        if (depth >= maxDepth || !obj || typeof obj !== "object") return "";
-        let r = "";
-        for (const key of Object.keys(obj)) {
-          const val = obj[key];
-          const type = Array.isArray(val) ? `Array(${val.length})` : typeof val;
-          r += `${"  ".repeat(depth)}${key}: ${type}\n`;
-          if (val && typeof val === "object" && depth < maxDepth - 1) {
-            r += getKeys(val, depth + 1, maxDepth);
-          }
-        }
-        return r;
-      }
-
-      const keysInfo = getKeys(state, 0, 3);
-      return { content: [{ type: "text", text: `❌ 搜索"${keyword}"未找到结果。\n\n可能原因：小红书搜索结果通过JS动态加载，curl无法获取。\n\nState结构：\n${keysInfo}` }] };
+      return { content: [{ type: "text", text: resultText }] };
     }
   );
 
@@ -388,7 +327,7 @@ function createMcpServer() {
 const httpServer = createServer(async (req, res) => {
   if (req.url === "/health") {
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ status: "ok", version: "2.2.0" }));
+    res.end(JSON.stringify({ status: "ok", version: "3.0.0" }));
     return;
   }
 
@@ -432,4 +371,5 @@ httpServer.listen(PORT, () => {
   console.log(`MCP endpoint: http://localhost:${PORT}/mcp`);
   console.log(`Health check: http://localhost:${PORT}/health`);
   console.log(`Cookie configured: ${getXhsCookie() ? "YES" : "NO"}`);
+  console.log(`Signature.js exists: ${existsSync("./signature.js") ? "YES" : "NO (will download on first search)"}`);
 });
