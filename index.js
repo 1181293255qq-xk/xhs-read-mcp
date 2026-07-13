@@ -37,7 +37,6 @@ function getSignContext() {
 
   try {
     const signJs = readFileSync("./signature.js", "utf-8");
-    const vm = require("vm");
     
     const context = {
       console: { log: () => {}, error: () => {}, warn: () => {} },
