@@ -6,6 +6,7 @@ import { writeFileSync, readFileSync, existsSync, mkdirSync, unlinkSync } from "
 import { join } from "path";
 import { createServer } from "http";
 import { createHash, randomBytes } from "crypto";
+import vm from "vm";
 import sharp from "sharp";
 
 const PORT = process.env.PORT || 3000;
@@ -222,11 +223,11 @@ function createMcpServer() {
         }
       }
 
-      let text = `í ½í³ ${title}\n`;
-      text += `í ½í±¤ ${user}`;
+      let text = `ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ${title}\n`;
+      text += `ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ${user}`;
       if (time) text += ` Â· ${time}`;
-      text += `\nâ¤ï¸ ${likes}  â­ ${collects}  í ½í²¬ ${comments}`;
-      if (noteType === "video") text += `  í ¼í¾¬ è§†é¢‘å¸–`;
+      text += `\nâ¤ï¸ ${likes}  â­ ${collects}  ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ${comments}`;
+      if (noteType === "video") text += `  ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ è§†é¢‘å¸–`;
       text += `\n\n${desc}`;
       text += commentText;
 
@@ -364,7 +365,7 @@ function createMcpServer() {
       }
 
       // æ ¼å¼åŒ–ç»“æœ
-      let resultText = `í ½í´ æœç´¢"${keyword}" - æ‰¾åˆ°${items.length}æ¡ç»“æœï¼š\n\n`;
+      let resultText = `ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ æœç´¢"${keyword}" - æ‰¾åˆ°${items.length}æ¡ç»“æœï¼š\n\n`;
       const maxResults = Math.min(items.length, limit, 50);
 
       for (let i = 0; i < maxResults; i++) {
@@ -378,13 +379,13 @@ function createMcpServer() {
         const link = noteId ? `https://www.xiaohongshu.com/explore/${noteId}` : "";
 
         resultText += `${i + 1}. ${title}\n`;
-        resultText += `   í ½í±¤ ${user}  â¤ï¸ ${likes}`;
-        if (noteType === "video") resultText += `  í ¼í¾¬ è§†é¢‘`;
-        if (link) resultText += `\n   í ½í´— ${link}`;
+        resultText += `   ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ${user}  â¤ï¸ ${likes}`;
+        if (noteType === "video") resultText += `  ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ è§†é¢‘`;
+        if (link) resultText += `\n   ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ${link}`;
         resultText += `\n\n`;
       }
 
-      resultText += `---\ní ½í²¡ ç”¨ xhs_read å·¥å…·ä¼ å…¥é“¾æ¥å¯æŸ¥çœ‹å®Œæ•´ç¬”è®°å†…å®¹å’Œå›¾ç‰‡ã€‚`;
+      resultText += `---\nï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ç”¨ xhs_read å·¥å…·ä¼ å…¥é“¾æ¥å¯æŸ¥çœ‹å®Œæ•´ç¬”è®°å†…å®¹å’Œå›¾ç‰‡ã€‚`;
 
       return { content: [{ type: "text", text: resultText }] };
     }
