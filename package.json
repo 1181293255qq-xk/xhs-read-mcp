@@ -1,7 +1,7 @@
 {
-  "name": "xhs-read-mcp",
-  "version": "1.0.0",
-  "description": "MCP server for reading Xiaohongshu posts",
+  "name": "xhs-search-mcp",
+  "version": "2.0.0",
+  "description": "MCP server for searching and reading Xiaohongshu posts",
   "type": "module",
   "main": "index.js",
   "scripts": {
