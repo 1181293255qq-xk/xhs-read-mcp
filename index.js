@@ -5,6 +5,7 @@ import { execSync } from "child_process";
 import { writeFileSync, readFileSync, existsSync, mkdirSync, unlinkSync } from "fs";
 import { join } from "path";
 import { createServer } from "http";
+import { createHash, randomBytes } from "crypto";
 import sharp from "sharp";
 
 const PORT = process.env.PORT || 3000;
@@ -18,16 +19,86 @@ function getXhsCookie() {
   return `web_session=${webSession}; a1=${a1}; webId=${webId}`;
 }
 
-// ── 签名生成 ──────────────────────────────────────────────────────────────────
+// ── 签名生成（使用 vm 模块）──────────────────────────────────────────────────
+let _signContext = null;
+
+function getSignContext() {
+  if (_signContext) return _signContext;
+  
+  if (!existsSync("./signature.js")) {
+    try {
+      execSync(`curl -sL https://raw.githubusercontent.com/leeguooooo/xhs-python-sdk/main/xhs_sdk/core/signature.js -o signature.js`, { encoding: "utf-8", timeout: 30000 });
+    } catch (e) {
+      console.error("Failed to download signature.js:", e.message);
+      return null;
+    }
+  }
+
+  try {
+    const signJs = readFileSync("./signature.js", "utf-8");
+    const vm = require("vm");
+    
+    const context = {
+      console: { log: () => {}, error: () => {}, warn: () => {} },
+      Buffer: Buffer,
+      process: { platform: "linux" },
+      setTimeout: setTimeout,
+      setInterval: () => {},
+      clearTimeout: clearTimeout,
+      clearInterval: () => {},
+      String: String,
+      Array: Array,
+      Object: Object,
+      Number: Number,
+      Boolean: Boolean,
+      Math: Math,
+      Date: Date,
+      JSON: JSON,
+      Error: Error,
+      TypeError: TypeError,
+      parseInt: parseInt,
+      parseFloat: parseFloat,
+      isNaN: isNaN,
+      encodeURIComponent: encodeURIComponent,
+      decodeURIComponent: decodeURIComponent,
+      RegExp: RegExp,
+      undefined: undefined,
+      NaN: NaN,
+      Infinity: Infinity,
+      isNaN: isNaN,
+      isFinite: isFinite,
+    };
+    
+    // signature.js 需要 window = global
+    context.window = context;
+    context.global = context;
+    context.document = { cookie: "" };
+    context.navigator = { userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" };
+    
+    vm.createContext(context);
+    vm.runInContext(signJs, context);
+    
+    _signContext = context;
+    console.log("Signature context loaded successfully");
+    return context;
+  } catch (e) {
+    console.error("Failed to load signature context:", e.message);
+    return null;
+  }
+}
+
 function generateSignature(uri, data, cookie) {
   try {
-    const dataFile = "/tmp/xhs_sign_data.json";
-    writeFileSync(dataFile, JSON.stringify(data));
-    const result = execSync(
-      `node generate_sign.js "${uri}" "${dataFile}" "${cookie.replace(/"/g, '\\"')}"`,
-      { encoding: "utf-8", timeout: 10000, maxBuffer: 5 * 1024 * 1024 }
-    );
-    const parsed = JSON.parse(result.trim());
+    const ctx = getSignContext();
+    if (!ctx) return null;
+    
+    // 设置 cookie
+    ctx.document.cookie = cookie;
+    
+    // 调用签名函数
+    const result = ctx.GetXsXt(uri, data, cookie);
+    const parsed = typeof result === "string" ? JSON.parse(result) : result;
+    
     return {
       "x-s": parsed["X-s"] || parsed["x-s"] || "",
       "x-t": String(parsed["X-t"] || parsed["x-t"] || ""),
@@ -40,9 +111,9 @@ function generateSignature(uri, data, cookie) {
 
 // ── 生成 search_id ────────────────────────────────────────────────────────────
 function generateSearchId() {
-  const timestamp = Date.now() << 64;
+  const timestamp = Date.now();
   const random = Math.floor(Math.random() * 2147483646);
-  const num = BigInt(timestamp) + BigInt(random);
+  const num = BigInt(timestamp) * BigInt(2 ** 64) + BigInt(random);
   return num.toString(36).toUpperCase() || "0";
 }
 
@@ -67,10 +138,10 @@ async function sharpProcess(items) {
 function createMcpServer() {
   const server = new McpServer({
     name: "xhs-search-mcp",
-    version: "3.0.0",
+    version: "3.1.0",
   });
 
-  // ── xhs_read tool（保留原有功能）────────────────────────────────────────────
+  // ── xhs_read tool ────────────────────────────────────────────────────────────
   server.tool(
     "xhs_read",
     "读取小红书笔记内容。输入一个小红书链接（短链 xhslink.com 或完整链接 xiaohongshu.com），返回笔记标题、正文、作者、互动数据、首屏评论和图片。视频帖只返回文字和封面图。Keywords: 小红书 xiaohongshu xhs read note link",
@@ -197,7 +268,7 @@ function createMcpServer() {
     }
   );
 
-  // ── xhs_search tool（v3.0 带签名）───────────────────────────────────────────
+  // ── xhs_search tool（v3.1）──────────────────────────────────────────────────
   server.tool(
     "xhs_search",
     "搜索小红书笔记。输入关键词，返回相关笔记列表（标题、作者、点赞数、链接）。需配置cookie环境变量。Keywords: 小红书 搜索 search xhs",
@@ -214,17 +285,6 @@ function createMcpServer() {
 
       const XHS_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
-      // 检查 signature.js 是否存在
-      if (!existsSync("./signature.js")) {
-        // 尝试下载
-        try {
-          execSync(`curl -sL https://raw.githubusercontent.com/leeguooooo/xhs-python-sdk/main/xhs_sdk/core/signature.js -o signature.js`, { encoding: "utf-8", timeout: 30000 });
-        } catch (e) {
-          return { content: [{ type: "text", text: "❌ 签名文件不存在且下载失败。请手动放置 signature.js" }] };
-        }
-      }
-
-      // 构造搜索请求
       const sortMap = { general: "general", popularity: "popularity_desc", time: "time_desc" };
       const sortValue = sortMap[sort] || "general";
       const searchId = generateSearchId();
@@ -245,11 +305,21 @@ function createMcpServer() {
 
       // 生成签名
       const signature = generateSignature(uri, searchData, cookie);
-      if (!signature) {
-        return { content: [{ type: "text", text: "❌ 签名生成失败。请检查 signature.js 是否正确加载。" }] };
+      if (!signature || !signature["x-s"]) {
+        // 签名失败，返回详细错误
+        let errMsg = "❌ 签名生成失败。";
+        // 检查 signature.js 是否存在
+        if (!existsSync("./signature.js")) {
+          errMsg += " signature.js 文件不存在。";
+        } else {
+          const stat = readFileSync("./signature.js", "utf-8");
+          errMsg += ` signature.js 大小: ${stat.length} 字符。`;
+          errMsg += ` 包含GetXsXt: ${stat.includes("GetXsXt")}。`;
+        }
+        return { content: [{ type: "text", text: errMsg }] };
       }
 
-      // 写入请求体到临时文件
+      // 写入请求体
       const bodyFile = "/tmp/xhs_search_body.json";
       writeFileSync(bodyFile, JSON.stringify(searchData));
 
@@ -279,12 +349,12 @@ function createMcpServer() {
       try {
         apiData = JSON.parse(apiResult);
       } catch (e) {
-        return { content: [{ type: "text", text: `API返回解析失败: ${e.message}\n返回内容: ${apiResult.substring(0, 500)}` }] };
+        return { content: [{ type: "text", text: `API返回解析失败。\n返回内容前500字符: ${apiResult.substring(0, 500)}` }] };
       }
 
       // 检查API错误
       if (apiData.code && apiData.code !== 0) {
-        return { content: [{ type: "text", text: `❌ API返回错误: code=${apiData.code}, msg=${apiData.msg || ""}` }] };
+        return { content: [{ type: "text", text: `❌ API返回错误: code=${apiData.code}, msg=${apiData.msg || ""}\n\n这可能意味着签名验证失败或cookie过期。` }] };
       }
 
       // 提取搜索结果
@@ -327,7 +397,11 @@ function createMcpServer() {
 const httpServer = createServer(async (req, res) => {
   if (req.url === "/health") {
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ status: "ok", version: "3.0.0" }));
+    res.end(JSON.stringify({ 
+      status: "ok", 
+      version: "3.1.0",
+      signatureLoaded: _signContext !== null,
+    }));
     return;
   }
 
@@ -371,5 +445,6 @@ httpServer.listen(PORT, () => {
   console.log(`MCP endpoint: http://localhost:${PORT}/mcp`);
   console.log(`Health check: http://localhost:${PORT}/health`);
   console.log(`Cookie configured: ${getXhsCookie() ? "YES" : "NO"}`);
-  console.log(`Signature.js exists: ${existsSync("./signature.js") ? "YES" : "NO (will download on first search)"}`);
+  // 预加载签名上下文
+  getSignContext();
 });
