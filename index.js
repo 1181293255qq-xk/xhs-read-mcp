@@ -2,119 +2,102 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import { execSync } from "child_process";
-import { writeFileSync, readFileSync, existsSync, mkdirSync, unlinkSync } from "fs";
+import { mkdirSync, unlinkSync } from "fs";
 import { join } from "path";
 import { createServer } from "http";
-import { createHash, randomBytes } from "crypto";
-import vm from "vm";
 import sharp from "sharp";
 
 const PORT = process.env.PORT || 3000;
 
-// ── cookie 构造 ───────────────────────────────────────────────────────────────
-function getXhsCookie() {
-  const webSession = process.env.XHS_WEB_SESSION || "";
-  const a1 = process.env.XHS_A1 || "";
-  const webId = process.env.XHS_WEB_ID || "";
-  if (!webSession) return null;
-  return `web_session=${webSession}; a1=${a1}; webId=${webId}`;
-}
+// ── DuckDuckGo 搜索小红书（无需 cookie）──────────────────────────────────────
+async function searchXhsViaDDG(keyword, limit = 10) {
+  const query = encodeURIComponent(`site:xiaohongshu.com ${keyword}`);
+  const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
-// ── 签名生成（使用 vm 模块）──────────────────────────────────────────────────
-let _signContext = null;
+  // Step 1: 拿 vqd token
+  let vqd = "";
+  try {
+    const initHtml = execSync(
+      `curl -sL -A "${UA}" -H "Accept-Language: zh-CN,zh;q=0.9" --max-time 10 "https://duckduckgo.com/?q=${query}&ia=web"`,
+      { encoding: "utf-8", maxBuffer: 5 * 1024 * 1024 }
+    );
+    const vqdMatch = initHtml.match(/vqd=['"]([^'"]+)['"]/);
+    if (vqdMatch) vqd = vqdMatch[1];
+  } catch (e) {
+    console.error("DDG init failed:", e.message);
+  }
 
-function getSignContext() {
-  if (_signContext) return _signContext;
-  
-  if (!existsSync("./signature.js")) {
-    try {
-      execSync(`curl -sL https://raw.githubusercontent.com/leeguooooo/xhs-python-sdk/main/xhs_sdk/core/signature.js -o signature.js`, { encoding: "utf-8", timeout: 30000 });
-    } catch (e) {
-      console.error("Failed to download signature.js:", e.message);
-      return null;
+  if (!vqd) {
+    return await searchXhsViaHtml(keyword, limit);
+  }
+
+  // Step 2: 调用 DDG JS API
+  let results = [];
+  try {
+    const apiUrl = `https://links.duckduckgo.com/d.js?q=${query}&vqd=${encodeURIComponent(vqd)}&p=1&s=0&df=&ex=-1`;
+    const apiRes = execSync(
+      `curl -sL -A "${UA}" -H "Referer: https://duckduckgo.com/" --max-time 10 "${apiUrl}"`,
+      { encoding: "utf-8", maxBuffer: 5 * 1024 * 1024 }
+    );
+    const dataMatch = apiRes.match(/DDG\.pageLayout\.load\('d',(\[.+\])\)/s);
+    if (dataMatch) {
+      const items = JSON.parse(dataMatch[1]);
+      for (const item of items) {
+        if (!item.u) continue;
+        if (!item.u.includes("xiaohongshu.com") && !item.u.includes("xhslink.com")) continue;
+        results.push({
+          title: item.t ? item.t.replace(/<[^>]+>/g, "") : "(无标题)",
+          url: item.u,
+          snippet: item.a ? item.a.replace(/<[^>]+>/g, "") : "",
+        });
+        if (results.length >= limit) break;
+      }
     }
+  } catch (e) {
+    console.error("DDG API failed:", e.message);
   }
 
-  try {
-    const signJs = readFileSync("./signature.js", "utf-8");
-    
-    const context = {
-      console: { log: () => {}, error: () => {}, warn: () => {} },
-      Buffer: Buffer,
-      process: { platform: "linux" },
-      setTimeout: setTimeout,
-      setInterval: () => {},
-      clearTimeout: clearTimeout,
-      clearInterval: () => {},
-      String: String,
-      Array: Array,
-      Object: Object,
-      Number: Number,
-      Boolean: Boolean,
-      Math: Math,
-      Date: Date,
-      JSON: JSON,
-      Error: Error,
-      TypeError: TypeError,
-      parseInt: parseInt,
-      parseFloat: parseFloat,
-      isNaN: isNaN,
-      encodeURIComponent: encodeURIComponent,
-      decodeURIComponent: decodeURIComponent,
-      RegExp: RegExp,
-      undefined: undefined,
-      NaN: NaN,
-      Infinity: Infinity,
-      isNaN: isNaN,
-      isFinite: isFinite,
-    };
-    
-    // signature.js 需要 window = global
-    context.window = context;
-    context.global = context;
-    context.document = { cookie: "" };
-    context.navigator = { userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" };
-    
-    vm.createContext(context);
-    vm.runInContext(signJs, context);
-    
-    _signContext = context;
-    console.log("Signature context loaded successfully");
-    return context;
-  } catch (e) {
-    console.error("Failed to load signature context:", e.message);
-    return null;
+  if (results.length === 0) {
+    return await searchXhsViaHtml(keyword, limit);
   }
+  return results;
 }
 
-function generateSignature(uri, data, cookie) {
-  try {
-    const ctx = getSignContext();
-    if (!ctx) return null;
-    
-    // 设置 cookie
-    ctx.document.cookie = cookie;
-    
-    // 调用签名函数
-    const result = ctx.GetXsXt(uri, data, cookie);
-    const parsed = typeof result === "string" ? JSON.parse(result) : result;
-    
-    return {
-      "x-s": parsed["X-s"] || parsed["x-s"] || "",
-      "x-t": String(parsed["X-t"] || parsed["x-t"] || ""),
-    };
-  } catch (e) {
-    console.error(`Signature generation failed: ${e.message}`);
-    return null;
-  }
-}
+// ── 备用：抓 DuckDuckGo HTML 页面解析 ────────────────────────────────────────
+async function searchXhsViaHtml(keyword, limit = 10) {
+  const query = encodeURIComponent(`site:xiaohongshu.com ${keyword}`);
+  const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+  const results = [];
 
-// ── 生成 search_id ────────────────────────────────────────────────────────────
-function generateSearchId() {
-  const timestamp = Date.now();
-  const random = Math.floor(Math.random() * 2147483646);
-  const num = BigInt(timestamp) * BigInt(2 ** 64) + BigInt(random);
-  return num.toString(36).toUpperCase() || "0";
+  try {
+    const html = execSync(
+      `curl -sL -A "${UA}" -H "Accept-Language: zh-CN,zh;q=0.9" --max-time 15 "https://html.duckduckgo.com/html/?q=${query}"`,
+      { encoding: "utf-8", maxBuffer: 5 * 1024 * 1024 }
+    );
+
+    // 提取链接和标题
+    const linkRe = /class="result__a"[^>]*href="([^"]*xiaohongshu\.com[^"]*)"[^>]*>([^<]+)<\/a>/g;
+    const snippetRe = /class="result__snippet"[^>]*>([^<]+)</g;
+    const snippets = [];
+    let sm;
+    while ((sm = snippetRe.exec(html)) !== null) {
+      snippets.push(sm[1].trim());
+    }
+    let lm;
+    let idx = 0;
+    while ((lm = linkRe.exec(html)) !== null && results.length < limit) {
+      results.push({
+        title: lm[2].trim(),
+        url: lm[1],
+        snippet: snippets[idx] || "",
+      });
+      idx++;
+    }
+  } catch (e) {
+    console.error("DDG HTML fallback failed:", e.message);
+  }
+
+  return results;
 }
 
 // ── sharp 图片处理 ────────────────────────────────────────────────────────────
@@ -138,10 +121,10 @@ async function sharpProcess(items) {
 function createMcpServer() {
   const server = new McpServer({
     name: "xhs-search-mcp",
-    version: "3.1.0",
+    version: "4.0.0",
   });
 
-  // ── xhs_read tool ────────────────────────────────────────────────────────────
+  // ── xhs_read tool ─────────────────────────────────────────────────────────
   server.tool(
     "xhs_read",
     "读取小红书笔记内容。输入一个小红书链接（短链 xhslink.com 或完整链接 xiaohongshu.com），返回笔记标题、正文、作者、互动数据、首屏评论和图片。视频帖只返回文字和封面图。Keywords: 小红书 xiaohongshu xhs read note link",
@@ -222,11 +205,11 @@ function createMcpServer() {
         }
       }
 
-      let text = `������ ${title}\n`;
-      text += `������ ${user}`;
+      let text = `������ ${title}\n`;
+      text += `������ ${user}`;
       if (time) text += ` · ${time}`;
-      text += `\n❤️ ${likes}  ⭐ ${collects}  ������ ${comments}`;
-      if (noteType === "video") text += `  ������ 视频帖`;
+      text += `\n❤️ ${likes}  ⭐ ${collects}  ������ ${comments}`;
+      if (noteType === "video") text += `  ������ 视频帖`;
       text += `\n\n${desc}`;
       text += commentText;
 
@@ -268,125 +251,31 @@ function createMcpServer() {
     }
   );
 
-  // ── xhs_search tool（v3.1）──────────────────────────────────────────────────
+  // ── xhs_search tool v4.0（DuckDuckGo，无需 cookie）────────────────────────
   server.tool(
     "xhs_search",
-    "搜索小红书笔记。输入关键词，返回相关笔记列表（标题、作者、点赞数、链接）。需配置cookie环境变量。Keywords: 小红书 搜索 search xhs",
+    "搜索小红书笔记。输入关键词，通过 DuckDuckGo 搜索返回相关笔记链接和摘要，无需登录和 cookie。Keywords: 小红书 搜索 search xhs",
     {
       keyword: z.string().describe("搜索关键词"),
-      limit: z.number().int().optional().describe("返回结果数量，默认20，最大50"),
-      sort: z.string().optional().describe("排序：general(综合) / popularity(最热) / time(最新)，默认general"),
+      limit: z.number().int().optional().describe("返回结果数量，默认10，最大20"),
     },
-    async ({ keyword, limit = 20, sort = "general" }) => {
-      const cookie = getXhsCookie();
-      if (!cookie) {
-        return { content: [{ type: "text", text: "❌ 未配置小红书cookie。请在Render环境变量中设置：\nXHS_WEB_SESSION\nXHS_A1\nXHS_WEB_ID" }] };
+    async ({ keyword, limit = 10 }) => {
+      const results = await searchXhsViaDDG(keyword, Math.min(limit, 20));
+
+      if (results.length === 0) {
+        return { content: [{ type: "text", text: `搜索"${keyword}"未找到结果。DuckDuckGo 可能暂时限速，稍后重试。` }] };
       }
 
-      const XHS_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
-
-      const sortMap = { general: "general", popularity: "popularity_desc", time: "time_desc" };
-      const sortValue = sortMap[sort] || "general";
-      const searchId = generateSearchId();
-
-      const searchData = {
-        keyword: keyword,
-        page: 1,
-        page_size: Math.min(limit, 50),
-        search_id: searchId,
-        sort: sortValue,
-        note_type: 0,
-        ext_flags: [],
-        geo: "",
-        image_formats: JSON.stringify(["jpg", "webp", "avif"]),
-      };
-
-      const uri = "/api/sns/web/v1/search/notes";
-
-      // 生成签名
-      const signature = generateSignature(uri, searchData, cookie);
-      if (!signature || !signature["x-s"]) {
-        // 签名失败，返回详细错误
-        let errMsg = "❌ 签名生成失败。";
-        // 检查 signature.js 是否存在
-        if (!existsSync("./signature.js")) {
-          errMsg += " signature.js 文件不存在。";
-        } else {
-          const stat = readFileSync("./signature.js", "utf-8");
-          errMsg += ` signature.js 大小: ${stat.length} 字符。`;
-          errMsg += ` 包含GetXsXt: ${stat.includes("GetXsXt")}。`;
-        }
-        return { content: [{ type: "text", text: errMsg }] };
+      let text = `������ 搜索"${keyword}" — 找到 ${results.length} 条结果：\n\n`;
+      for (let i = 0; i < results.length; i++) {
+        const r = results[i];
+        text += `${i + 1}. ${r.title}\n`;
+        if (r.snippet) text += `   ${r.snippet}\n`;
+        text += `   ������ ${r.url}\n\n`;
       }
+      text += `---\n������ 用 xhs_read 工具传入链接可查看完整笔记内容和图片。`;
 
-      // 写入请求体
-      const bodyFile = "/tmp/xhs_search_body.json";
-      writeFileSync(bodyFile, JSON.stringify(searchData));
-
-      // 构造 curl 命令
-      const apiUrl = `https://edith.xiaohongshu.com${uri}`;
-      const curlCmd = `curl -sL -X POST "${apiUrl}" \
-        -A "${XHS_UA}" \
-        -b "${cookie}" \
-        -H "Content-Type: application/json;charset=UTF-8" \
-        -H "Origin: https://www.xiaohongshu.com" \
-        -H "Referer: https://www.xiaohongshu.com/" \
-        -H "Accept: application/json" \
-        -H "x-s: ${signature["x-s"]}" \
-        -H "x-t: ${signature["x-t"]}" \
-        -d @${bodyFile} \
-        --max-time 15`;
-
-      let apiResult;
-      try {
-        apiResult = execSync(curlCmd, { encoding: "utf-8", maxBuffer: 10 * 1024 * 1024 });
-      } catch (e) {
-        return { content: [{ type: "text", text: `搜索请求失败: ${e.message}` }] };
-      }
-
-      // 解析API返回
-      let apiData;
-      try {
-        apiData = JSON.parse(apiResult);
-      } catch (e) {
-        return { content: [{ type: "text", text: `API返回解析失败。\n返回内容前500字符: ${apiResult.substring(0, 500)}` }] };
-      }
-
-      // 检查API错误
-      if (apiData.code && apiData.code !== 0) {
-        return { content: [{ type: "text", text: `❌ API返回错误: code=${apiData.code}, msg=${apiData.msg || ""}\n\n这可能意味着签名验证失败或cookie过期。` }] };
-      }
-
-      // 提取搜索结果
-      const items = apiData?.data?.items || [];
-      if (items.length === 0) {
-        return { content: [{ type: "text", text: `搜索"${keyword}"未找到结果。` }] };
-      }
-
-      // 格式化结果
-      let resultText = `������ 搜索"${keyword}" - 找到${items.length}条结果：\n\n`;
-      const maxResults = Math.min(items.length, limit, 50);
-
-      for (let i = 0; i < maxResults; i++) {
-        const item = items[i];
-        const note = item.note_card || item.note || item;
-        const noteId = note.note_id || note.noteId || item.id || "";
-        const title = note.display_title || note.title || "(无标题)";
-        const user = note.user?.nickname || note.user?.nickName || "未知用户";
-        const likes = note.interact_info?.liked_count || "0";
-        const noteType = note.type || "";
-        const link = noteId ? `https://www.xiaohongshu.com/explore/${noteId}` : "";
-
-        resultText += `${i + 1}. ${title}\n`;
-        resultText += `   ������ ${user}  ❤️ ${likes}`;
-        if (noteType === "video") resultText += `  ������ 视频`;
-        if (link) resultText += `\n   ������ ${link}`;
-        resultText += `\n\n`;
-      }
-
-      resultText += `---\n������ 用 xhs_read 工具传入链接可查看完整笔记内容和图片。`;
-
-      return { content: [{ type: "text", text: resultText }] };
+      return { content: [{ type: "text", text }] };
     }
   );
 
@@ -397,10 +286,10 @@ function createMcpServer() {
 const httpServer = createServer(async (req, res) => {
   if (req.url === "/health") {
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ 
-      status: "ok", 
-      version: "3.1.0",
-      signatureLoaded: _signContext !== null,
+    res.end(JSON.stringify({
+      status: "ok",
+      version: "4.0.0",
+      mode: "DuckDuckGo (no cookie required)",
     }));
     return;
   }
@@ -441,10 +330,8 @@ function readBody(req) {
 }
 
 httpServer.listen(PORT, () => {
-  console.log(`xhs-search-mcp server running on port ${PORT}`);
+  console.log(`xhs-search-mcp v4.0 running on port ${PORT}`);
   console.log(`MCP endpoint: http://localhost:${PORT}/mcp`);
   console.log(`Health check: http://localhost:${PORT}/health`);
-  console.log(`Cookie configured: ${getXhsCookie() ? "YES" : "NO"}`);
-  // 预加载签名上下文
-  getSignContext();
+  console.log(`Mode: DuckDuckGo search (no cookie required)`);
 });
