@@ -1,12 +1,11 @@
 {
   "name": "xhs-search-mcp",
-  "version": "3.0.0",
-  "description": "MCP server for searching and reading Xiaohongshu posts",
+  "version": "4.0.0",
+  "description": "MCP server for searching and reading Xiaohongshu posts (no cookie required)",
   "type": "module",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js",
-    "postinstall": "curl -sL https://raw.githubusercontent.com/leeguooooo/xhs-python-sdk/main/xhs_sdk/core/signature.js -o signature.js || echo 'signature.js download failed, will try on first search'"
+    "start": "node index.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.12.1",
